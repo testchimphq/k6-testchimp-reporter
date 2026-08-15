@@ -1,0 +1,31 @@
+{
+  "name": "@testchimp/k6",
+  "version": "0.1.0",
+  "description": "k6 handleSummary reporter that ingests performance run summaries into TestChimp",
+  "type": "module",
+  "main": "handleSummary.js",
+  "exports": {
+    ".": "./handleSummary.js",
+    "./handleSummary": "./handleSummary.js",
+    "./ingest": "./ingest.js"
+  },
+  "files": [
+    "handleSummary.js",
+    "ingest.js",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "testchimp",
+    "k6",
+    "performance",
+    "load-testing"
+  ],
+  "author": "TestChimp",
+  "license": "MIT"
+}
