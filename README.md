@@ -36,10 +36,24 @@ k6 cannot read sibling `export const testchimp` from `handleSummary`. Pass the s
 | `TESTCHIMP_BRANCH_NAME` | Git branch (or `GITHUB_REF_NAME`) |
 | `TESTCHIMP_PERF_META` | Optional JSON blob of the `testchimp` object |
 
-Until the package is on jsDelivr, pin a local checkout:
+## Publish / delivery
+
+1. Bump `version` in `package.json`, commit, push.
+2. `npm publish --access public` (no build step — ships `handleSummary.js` + `ingest.js`).
+3. User projects pick it up automatically: `k6/scripts/prepare.sh` (and every
+   `run-journey.sh`) downloads **npm `latest`** into gitignored `k6/lib/`.
+
+Optional overrides in a project:
 
 ```bash
+# dogfood an unpublished checkout
 K6_REPORTER_LOCAL_DIR=/path/to/k6-testchimp-reporter k6/scripts/prepare.sh
+
+# pin a specific release (CI reproducibility)
+K6_REPORTER_VERSION=0.1.0 k6/scripts/prepare.sh
+
+# reuse already-downloaded lib (offline / airgapped)
+K6_REPORTER_SKIP_REFRESH=1 k6/scripts/prepare.sh
 ```
 
-Do **not** vendor this file into the repo. Pin the version in `k6/scripts/prepare.sh`.
+Do **not** vendor reporter files into the app repo.
