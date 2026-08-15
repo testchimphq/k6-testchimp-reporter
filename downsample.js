@@ -1,6 +1,8 @@
 /**
  * Downsample k6 `--out json` metric points into a compact timeseries for TestChimp.
- * Node-safe (no k6 imports). Call from CI/scripts after the run, not from handleSummary.
+ * Every metric k6 emits (built-in and custom) is bucketed by name — not a thin subset.
+ * Aggregation is by metric name only (tags are folded). Node-safe (no k6 imports).
+ * Call from CI/scripts after the run, not from handleSummary.
  *
  * File paths are streamed (two passes) so large k6 JSON dumps are not loaded whole.
  */
@@ -100,6 +102,40 @@ function failedFromTags(tags) {
   return null;
 }
 
+/** Status-class series folded into http_req_failed (not 2xx — that is success). */
+const STATUS_CLASSES = ['0xx', '3xx', '4xx', '5xx'];
+
+/**
+ * Map k6 `tags.status` (string or number) to a response-class bucket.
+ * 0 / missing / 1xx / 6xx+ → 0xx (no HTTP response or other).
+ * Returns null when the tag is absent so untagged dumps stay unchanged.
+ */
+function parseStatusClass(tags) {
+  if (!tags || typeof tags !== 'object') return null;
+  const raw = tags.status;
+  if (raw == null || raw === '') return null;
+  const n = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(n)) return null;
+  if (n < 100) return '0xx';
+  const hundred = Math.floor(n / 100);
+  if (hundred === 2) return '2xx';
+  if (hundred === 3) return '3xx';
+  if (hundred === 4) return '4xx';
+  if (hundred === 5) return '5xx';
+  return '0xx';
+}
+
+function statusClassWeight(sample) {
+  if (sample.metric === 'http_reqs' && Number.isFinite(sample.value) && sample.value > 0) {
+    return sample.value;
+  }
+  return 1;
+}
+
+function emptyStatusClassCounts() {
+  return { '0xx': 0, '3xx': 0, '4xx': 0, '5xx': 0 };
+}
+
 function isExistingFilePath(value) {
   if (typeof value !== 'string') return false;
   const trimmed = value.trim();
@@ -149,6 +185,74 @@ function forEachNdjsonLine(path, fn) {
   }
 }
 
+/** k6 built-in metric types when a Metric record is missing. */
+const KNOWN_TYPES = {
+  checks: 'rate',
+  data_received: 'counter',
+  data_sent: 'counter',
+  dropped_iterations: 'counter',
+  group_duration: 'trend',
+  http_req_blocked: 'trend',
+  http_req_connecting: 'trend',
+  http_req_duration: 'trend',
+  http_req_failed: 'rate',
+  http_req_receiving: 'trend',
+  http_req_sending: 'trend',
+  http_req_tls_handshaking: 'trend',
+  http_req_waiting: 'trend',
+  http_reqs: 'counter',
+  iteration_duration: 'trend',
+  iterations: 'counter',
+  vus: 'gauge',
+  vus_max: 'gauge',
+};
+
+const VALID_TYPES = new Set(['trend', 'counter', 'gauge', 'rate']);
+const TREND_STATS = ['min', 'avg', 'med', 'p90', 'p95', 'max'];
+
+function metricTypeFromRecord(rec) {
+  if (!rec || rec.type !== 'Metric' || !rec.metric) return null;
+  const type = String(rec.data?.type || '').toLowerCase();
+  if (!VALID_TYPES.has(type)) return null;
+  return { name: String(rec.metric), type };
+}
+
+function resolveMetricType(name, metricTypes) {
+  const fromRecord = metricTypes && metricTypes.get(name);
+  if (fromRecord && VALID_TYPES.has(fromRecord)) return fromRecord;
+  return KNOWN_TYPES[name] || 'trend';
+}
+
+function seriesKeysForType(name, type, statusClassesSeen) {
+  let keys;
+  switch (type) {
+    case 'gauge':
+      keys = [name];
+      break;
+    case 'counter':
+      keys = [`${name}.count`, `${name}.rate`];
+      break;
+    case 'rate':
+      keys = [`${name}.rate`];
+      break;
+    default:
+      keys = TREND_STATS.map((stat) => `${name}.${stat}`);
+  }
+  if (name === 'http_req_failed' && statusClassesSeen && statusClassesSeen.size) {
+    for (const cls of STATUS_CLASSES) {
+      keys.push(`http_req_failed.${cls}.rate`);
+    }
+  }
+  return keys;
+}
+
+function buildCatalog(metricTypes, seenNames, statusClassesSeen) {
+  return [...seenNames].sort().map((name) => {
+    const type = resolveMetricType(name, metricTypes);
+    return { name, type, keys: seriesKeysForType(name, type, statusClassesSeen) };
+  });
+}
+
 function sampleFromRecord(rec) {
   if (!rec || rec.type === 'Metric') return null;
   if (rec.type !== 'Point' || !rec.metric || !rec.data) return null;
@@ -158,7 +262,7 @@ function sampleFromRecord(rec) {
   return { t, metric: String(rec.metric), value, tags: rec.data.tags };
 }
 
-function forEachFileSample(path, fn) {
+function forEachFileRecord(path, fn) {
   forEachNdjsonLine(path, (line) => {
     const s = line.trim();
     if (!s) return;
@@ -168,8 +272,7 @@ function forEachFileSample(path, fn) {
     } catch {
       return;
     }
-    const sample = sampleFromRecord(rec);
-    if (sample) fn(sample);
+    fn(rec);
   });
 }
 
@@ -182,49 +285,110 @@ function resolveInterval(intervalSec, maxPoints, t0, tLast) {
   return intervalSec;
 }
 
-function emptyBucket() {
+function emptyAccum(type) {
   return {
-    durations: [],
-    failedValues: [],
-    failedCount: 0,
-    passedCount: 0,
+    type,
+    values: [],
+    sum: 0,
+    last: undefined,
+    failCount: 0,
+    passCount: 0,
     usedBoolTags: false,
-    vus: undefined,
-    reqs: 0,
+    statusClass: emptyStatusClassCounts(),
+    statusTagged: 0,
   };
 }
 
-function addSample(buckets, sample, t0, intervalMs) {
+function recordStatusClass(a, sample) {
+  if (sample.metric !== 'http_req_failed' && sample.metric !== 'http_reqs') return false;
+  const cls = parseStatusClass(sample.tags);
+  if (!cls) return false;
+  const n = statusClassWeight(sample);
+  a.statusTagged += n;
+  if (a.statusClass[cls] != null) a.statusClass[cls] += n;
+  return true;
+}
+
+function addSample(buckets, sample, t0, intervalMs, metricTypes, statusClassesSeen) {
   const idx = Math.max(0, Math.floor((sample.t - t0) / intervalMs));
-  let b = buckets.get(idx);
-  if (!b) {
-    b = emptyBucket();
-    buckets.set(idx, b);
+  let bucket = buckets.get(idx);
+  if (!bucket) {
+    bucket = new Map();
+    buckets.set(idx, bucket);
   }
-  switch (sample.metric) {
-    case 'http_req_duration':
-      b.durations.push(sample.value);
-      break;
-    case 'vus':
-      b.vus = sample.value;
-      break;
-    case 'http_reqs':
-      b.reqs += sample.value;
-      break;
-    case 'http_req_failed': {
-      const tagFail = failedFromTags(sample.tags);
-      if (tagFail === true || tagFail === false) {
-        b.usedBoolTags = true;
-        if (tagFail) b.failedCount += 1;
-        else b.passedCount += 1;
-      } else {
-        b.failedValues.push(sample.value);
-      }
-      break;
+  const type = resolveMetricType(sample.metric, metricTypes);
+  let a = bucket.get(sample.metric);
+  if (!a) {
+    a = emptyAccum(type);
+    bucket.set(sample.metric, a);
+  }
+  a.last = sample.value;
+  a.sum += sample.value;
+  if (recordStatusClass(a, sample) && statusClassesSeen) {
+    statusClassesSeen.add('tagged');
+  }
+  if (type === 'rate' && sample.metric === 'http_req_failed') {
+    const tagFail = failedFromTags(sample.tags);
+    if (tagFail === true || tagFail === false) {
+      a.usedBoolTags = true;
+      if (tagFail) a.failCount += 1;
+      else a.passCount += 1;
+    } else {
+      a.values.push(sample.value);
     }
-    default:
-      break;
+    return;
   }
+  if (type === 'trend' || type === 'rate') {
+    a.values.push(sample.value);
+  }
+}
+
+function applyStatusClassRates(row, a) {
+  if (!a || !(a.statusTagged > 0)) return;
+  const denom = a.statusTagged;
+  for (const cls of STATUS_CLASSES) {
+    row[`http_req_failed.${cls}.rate`] = (a.statusClass[cls] || 0) / denom;
+  }
+}
+
+function flattenAccum(row, name, a, intervalSec, sibling) {
+  const type = a.type;
+  if (type === 'gauge') {
+    if (a.last != null) row[name] = a.last;
+    return;
+  }
+  if (type === 'counter') {
+    row[`${name}.count`] = a.sum;
+    row[`${name}.rate`] = a.sum / intervalSec;
+    return;
+  }
+  if (type === 'rate') {
+    if (name === 'http_req_failed' && a.usedBoolTags && a.failCount + a.passCount > 0) {
+      row[`${name}.rate`] = a.failCount / (a.failCount + a.passCount);
+    } else if (a.values.length) {
+      row[`${name}.rate`] = mean(a.values);
+    }
+    if (name === 'http_req_failed') {
+      const src = a.statusTagged > 0 ? a : sibling && sibling.get('http_reqs');
+      applyStatusClassRates(row, src);
+    }
+    return;
+  }
+  if (!a.values.length) return;
+  const sorted = a.values.slice().sort((x, y) => x - y);
+  row[`${name}.min`] = sorted[0];
+  row[`${name}.avg`] = mean(sorted);
+  row[`${name}.med`] = percentileApprox(sorted, 50);
+  row[`${name}.p90`] = percentileApprox(sorted, 90);
+  row[`${name}.p95`] = percentileApprox(sorted, 95);
+  row[`${name}.max`] = sorted[sorted.length - 1];
+}
+
+function applyV1Aliases(row) {
+  if (row['http_req_duration.p95'] != null) row.http_req_duration_p95 = row['http_req_duration.p95'];
+  if (row['http_req_duration.avg'] != null) row.http_req_duration_avg = row['http_req_duration.avg'];
+  if (row['http_req_failed.rate'] != null) row.http_req_failed_rate = row['http_req_failed.rate'];
+  if (row['http_reqs.rate'] != null) row.http_reqs_rate = row['http_reqs.rate'];
 }
 
 function pointsFromBuckets(buckets, t0, intervalSec) {
@@ -232,62 +396,104 @@ function pointsFromBuckets(buckets, t0, intervalSec) {
   const indices = [...buckets.keys()].sort((a, b) => a - b);
   const points = [];
   for (const idx of indices) {
-    const b = buckets.get(idx);
-    const sorted = b.durations.slice().sort((a, c) => a - c);
-    let http_req_failed_rate;
-    if (b.usedBoolTags && b.failedCount + b.passedCount > 0) {
-      http_req_failed_rate = b.failedCount / (b.failedCount + b.passedCount);
-    } else if (b.failedValues.length) {
-      http_req_failed_rate = mean(b.failedValues);
+    const bucket = buckets.get(idx);
+    const row = { t_ms: t0 + idx * intervalMs };
+    const names = [...bucket.keys()].sort();
+    for (const name of names) {
+      flattenAccum(row, name, bucket.get(name), intervalSec, bucket);
     }
-    points.push({
-      t_ms: t0 + idx * intervalMs,
-      vus: b.vus,
-      http_req_duration_p95: percentileApprox(sorted, 95),
-      http_req_duration_avg: mean(sorted),
-      http_req_failed_rate,
-      http_reqs_rate: b.reqs / intervalSec,
-    });
+    if (
+      row['http_req_failed.0xx.rate'] == null
+      && row['http_req_failed.3xx.rate'] == null
+      && row['http_req_failed.4xx.rate'] == null
+      && row['http_req_failed.5xx.rate'] == null
+    ) {
+      applyStatusClassRates(row, bucket.get('http_reqs'));
+    }
+    applyV1Aliases(row);
+    points.push(row);
   }
   return points;
 }
 
-function downsampleSamples(samples, intervalSec, maxPoints) {
+function emptyResult(intervalSec) {
+  return { version: 2, intervalSec, points: [], metrics: [] };
+}
+
+function downsampleSamples(samples, intervalSec, maxPoints, metricTypes) {
   if (!samples.length) {
-    return { intervalSec, points: [] };
+    return emptyResult(intervalSec);
   }
+  metricTypes = metricTypes || new Map();
   samples.sort((a, b) => a.t - b.t);
   const t0 = samples[0].t;
   intervalSec = resolveInterval(intervalSec, maxPoints, t0, samples[samples.length - 1].t);
   const intervalMs = intervalSec * 1000;
   const buckets = new Map();
+  const seen = new Set();
+  const statusClassesSeen = new Set();
   for (const sample of samples) {
-    addSample(buckets, sample, t0, intervalMs);
+    seen.add(sample.metric);
+    addSample(buckets, sample, t0, intervalMs, metricTypes, statusClassesSeen);
   }
-  return { intervalSec, points: pointsFromBuckets(buckets, t0, intervalSec) };
+  return {
+    version: 2,
+    intervalSec,
+    points: pointsFromBuckets(buckets, t0, intervalSec),
+    metrics: buildCatalog(metricTypes, seen, statusClassesSeen),
+  };
+}
+
+function collectFromRecords(records) {
+  const metricTypes = new Map();
+  const samples = [];
+  for (const rec of records) {
+    const mt = metricTypeFromRecord(rec);
+    if (mt) metricTypes.set(mt.name, mt.type);
+    const sample = sampleFromRecord(rec);
+    if (sample) samples.push(sample);
+  }
+  return { samples, metricTypes };
 }
 
 function downsampleNdjsonFile(path, intervalSec, maxPoints) {
+  const metricTypes = new Map();
   let t0 = null;
   let tLast = null;
-  forEachFileSample(path, (sample) => {
+  forEachFileRecord(path, (rec) => {
+    const mt = metricTypeFromRecord(rec);
+    if (mt) metricTypes.set(mt.name, mt.type);
+    const sample = sampleFromRecord(rec);
+    if (!sample) return;
     if (t0 == null || sample.t < t0) t0 = sample.t;
     if (tLast == null || sample.t > tLast) tLast = sample.t;
   });
   if (t0 == null) {
-    return { intervalSec, points: [] };
+    return emptyResult(intervalSec);
   }
   intervalSec = resolveInterval(intervalSec, maxPoints, t0, tLast);
   const intervalMs = intervalSec * 1000;
   const buckets = new Map();
-  forEachFileSample(path, (sample) => addSample(buckets, sample, t0, intervalMs));
-  return { intervalSec, points: pointsFromBuckets(buckets, t0, intervalSec) };
+  const seen = new Set();
+  const statusClassesSeen = new Set();
+  forEachFileRecord(path, (rec) => {
+    const sample = sampleFromRecord(rec);
+    if (!sample) return;
+    seen.add(sample.metric);
+    addSample(buckets, sample, t0, intervalMs, metricTypes, statusClassesSeen);
+  });
+  return {
+    version: 2,
+    intervalSec,
+    points: pointsFromBuckets(buckets, t0, intervalSec),
+    metrics: buildCatalog(metricTypes, seen, statusClassesSeen),
+  };
 }
 
 /**
  * @param {string|object[]} jsonPathOrContent - path to k6 JSON output, NDJSON/JSON string, or parsed array
  * @param {{ intervalSec?: number, maxPoints?: number }} [options]
- * @returns {{ intervalSec: number, points: Array<object> }}
+ * @returns {{ version: number, intervalSec: number, points: Array<object>, metrics: Array<object> }}
  */
 export function downsampleK6JsonMetrics(jsonPathOrContent, options) {
   const opts = options || {};
@@ -298,34 +504,30 @@ export function downsampleK6JsonMetrics(jsonPathOrContent, options) {
 
   if (isExistingFilePath(jsonPathOrContent)) {
     if (peekFirstNonWhitespace(jsonPathOrContent) === '[') {
-      const samples = [];
-      for (const rec of parseRecords(jsonPathOrContent)) {
-        const sample = sampleFromRecord(rec);
-        if (sample) samples.push(sample);
-      }
-      return downsampleSamples(samples, intervalSec, maxPoints);
+      const { samples, metricTypes } = collectFromRecords(parseRecords(jsonPathOrContent));
+      return downsampleSamples(samples, intervalSec, maxPoints, metricTypes);
     }
     return downsampleNdjsonFile(jsonPathOrContent, intervalSec, maxPoints);
   }
 
-  const samples = [];
-  for (const rec of parseRecords(jsonPathOrContent)) {
-    const sample = sampleFromRecord(rec);
-    if (sample) samples.push(sample);
-  }
-  return downsampleSamples(samples, intervalSec, maxPoints);
+  const { samples, metricTypes } = collectFromRecords(parseRecords(jsonPathOrContent));
+  return downsampleSamples(samples, intervalSec, maxPoints, metricTypes);
 }
 
 /**
  * Body for POST /api/ingest_perf_run_timeseries (protobuf JSON camelCase).
- * `points` may be an array or the `{ intervalSec, points }` result from downsampleK6JsonMetrics.
+ * `points` may be an array or the `{ version, intervalSec, points, metrics }` result from downsampleK6JsonMetrics.
  */
 export function buildTimeseriesAttachBody(runId, points, intervalSec) {
   let pts;
   let sec = intervalSec;
+  let version = 1;
+  let metrics;
   if (points && !Array.isArray(points) && Array.isArray(points.points)) {
     pts = points.points;
     if (sec == null) sec = points.intervalSec;
+    if (points.version != null) version = points.version;
+    if (Array.isArray(points.metrics)) metrics = points.metrics;
   } else {
     pts = Array.isArray(points) ? points : [];
   }
@@ -334,13 +536,15 @@ export function buildTimeseriesAttachBody(runId, points, intervalSec) {
   } else {
     sec = Number(sec);
   }
+  const payload = {
+    version,
+    intervalSec: sec,
+    points: pts,
+  };
+  if (metrics) payload.metrics = metrics;
   return {
     runId: String(runId || ''),
-    timeseriesJson: JSON.stringify({
-      version: 1,
-      intervalSec: sec,
-      points: pts,
-    }),
+    timeseriesJson: JSON.stringify(payload),
   };
 }
 
