@@ -1,0 +1,165 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  attachTimeseriesUrl,
+  buildTimeseriesAttachBody,
+  downsampleK6JsonMetrics,
+} from '../downsample.js';
+import { attachTimeseriesUrl as ingestAttachUrl } from '../ingest.js';
+
+function ndjson(points) {
+  return points.map((p) => JSON.stringify(p)).join('\n');
+}
+
+function point(metric, time, value, tags) {
+  const data = { time, value };
+  if (tags) data.tags = tags;
+  return { type: 'Point', metric, data };
+}
+
+describe('downsampleK6JsonMetrics', () => {
+  it('buckets NDJSON points and computes avg, p95, rates, last vus', () => {
+    const t0 = '2024-01-01T00:00:00.000Z';
+    const t1 = '2024-01-01T00:00:02.000Z';
+    const t2 = '2024-01-01T00:00:04.000Z';
+    const t3 = '2024-01-01T00:00:06.000Z'; // second bucket (interval 5s)
+
+    const raw = ndjson([
+      { type: 'Metric', metric: 'http_req_duration', data: { type: 'trend' } },
+      point('vus', t0, 1),
+      point('http_req_duration', t0, 100),
+      point('http_req_duration', t1, 200),
+      point('http_req_duration', t2, 300),
+      point('http_req_failed', t0, 0),
+      point('http_req_failed', t1, 1),
+      point('http_reqs', t0, 1),
+      point('http_reqs', t1, 1),
+      point('http_reqs', t2, 1),
+      point('vus', t2, 3),
+      point('vus', t3, 5),
+      point('http_req_duration', t3, 50),
+      point('http_reqs', t3, 2),
+      point('http_req_failed', t3, 0),
+    ]);
+
+    const { intervalSec, points } = downsampleK6JsonMetrics(raw, { intervalSec: 5, maxPoints: 500 });
+    assert.equal(intervalSec, 5);
+    assert.equal(points.length, 2);
+
+    const b0 = points[0];
+    assert.equal(b0.t_ms, Date.parse(t0));
+    assert.equal(b0.vus, 3);
+    assert.equal(b0.http_req_duration_avg, 200);
+    assert.equal(b0.http_req_duration_p95, 300);
+    assert.equal(b0.http_req_failed_rate, 0.5);
+    assert.equal(b0.http_reqs_rate, 3 / 5);
+
+    const b1 = points[1];
+    assert.equal(b1.t_ms, Date.parse(t0) + 5000);
+    assert.equal(b1.vus, 5);
+    assert.equal(b1.http_req_duration_avg, 50);
+    assert.equal(b1.http_reqs_rate, 2 / 5);
+  });
+
+  it('computes failed rate from expected_response boolean tags', () => {
+    const t0 = '2024-01-01T00:00:00.000Z';
+    const raw = ndjson([
+      point('http_req_failed', t0, 1, { expected_response: 'false' }),
+      point('http_req_failed', t0, 0, { expected_response: 'true' }),
+      point('http_req_failed', t0, 0, { expected_response: 'true' }),
+    ]);
+    const { points } = downsampleK6JsonMetrics(raw, { intervalSec: 5 });
+    assert.equal(points.length, 1);
+    assert.equal(points[0].http_req_failed_rate, 1 / 3);
+  });
+
+  it('accepts a JSON array of points', () => {
+    const arr = [
+      point('vus', '2024-01-01T00:00:00.000Z', 2),
+      point('http_reqs', '2024-01-01T00:00:01.000Z', 4),
+    ];
+    const { points } = downsampleK6JsonMetrics(JSON.stringify(arr), { intervalSec: 5 });
+    assert.equal(points.length, 1);
+    assert.equal(points[0].vus, 2);
+    assert.equal(points[0].http_reqs_rate, 4 / 5);
+  });
+
+  it('increases interval to respect maxPoints', () => {
+    const lines = [];
+    const t0 = Date.parse('2024-01-01T00:00:00.000Z');
+    // 60 seconds of samples every 1s → with intervalSec=1 would be 60 buckets; cap to 10
+    for (let i = 0; i < 60; i++) {
+      lines.push(point('vus', new Date(t0 + i * 1000).toISOString(), i + 1));
+      lines.push(point('http_reqs', new Date(t0 + i * 1000).toISOString(), 1));
+    }
+    const { intervalSec, points } = downsampleK6JsonMetrics(ndjson(lines), {
+      intervalSec: 1,
+      maxPoints: 10,
+    });
+    assert.ok(intervalSec >= 6, `expected intervalSec>=6 got ${intervalSec}`);
+    assert.ok(points.length <= 10, `expected <=10 points got ${points.length}`);
+  });
+
+  it('buckets NDJSON from a file without loading the whole string into parseRecords', () => {
+    const t0 = '2024-01-01T00:00:00.000Z';
+    const raw = ndjson([
+      point('vus', t0, 2),
+      point('http_reqs', t0, 4),
+    ]);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'k6-ts-'));
+    const file = path.join(dir, 'metrics.json');
+    fs.writeFileSync(file, raw);
+    try {
+      const { points } = downsampleK6JsonMetrics(file, { intervalSec: 5 });
+      assert.equal(points.length, 1);
+      assert.equal(points[0].vus, 2);
+      assert.equal(points[0].http_reqs_rate, 4 / 5);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty points for empty input', () => {
+    const { points, intervalSec } = downsampleK6JsonMetrics('', { intervalSec: 5 });
+    assert.equal(intervalSec, 5);
+    assert.deepEqual(points, []);
+  });
+});
+
+
+describe('buildTimeseriesAttachBody', () => {
+  it('wraps points with version and intervalSec', () => {
+    const body = buildTimeseriesAttachBody('run-1', [{ t_ms: 1, vus: 2 }], 5);
+    assert.equal(body.runId, 'run-1');
+    const parsed = JSON.parse(body.timeseriesJson);
+    assert.equal(parsed.version, 1);
+    assert.equal(parsed.intervalSec, 5);
+    assert.deepEqual(parsed.points, [{ t_ms: 1, vus: 2 }]);
+  });
+
+  it('accepts downsample result object', () => {
+    const body = buildTimeseriesAttachBody('run-2', {
+      intervalSec: 10,
+      points: [{ t_ms: 0, http_reqs_rate: 1 }],
+    });
+    const parsed = JSON.parse(body.timeseriesJson);
+    assert.equal(parsed.intervalSec, 10);
+    assert.equal(parsed.points.length, 1);
+  });
+});
+
+describe('attachTimeseriesUrl', () => {
+  it('uses resolveIngestBaseUrl from ingest', () => {
+    assert.equal(
+      attachTimeseriesUrl({ TESTCHIMP_INGRESS_URL: 'https://ingress-staging.testchimp.io/' }),
+      'https://ingress-staging.testchimp.io/api/ingest_perf_run_timeseries'
+    );
+    assert.equal(
+      ingestAttachUrl({}),
+      'https://ingress.testchimp.io/api/ingest_perf_run_timeseries'
+    );
+  });
+});

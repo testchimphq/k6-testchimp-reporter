@@ -1,17 +1,19 @@
 {
   "name": "@testchimp/k6",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "k6 handleSummary reporter that ingests performance run summaries into TestChimp",
   "type": "module",
   "main": "handleSummary.js",
   "exports": {
     ".": "./handleSummary.js",
     "./handleSummary": "./handleSummary.js",
-    "./ingest": "./ingest.js"
+    "./ingest": "./ingest.js",
+    "./downsample": "./downsample.js"
   },
   "files": [
     "handleSummary.js",
     "ingest.js",
+    "downsample.js",
     "README.md"
   ],
   "publishConfig": {

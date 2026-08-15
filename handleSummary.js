@@ -2,7 +2,7 @@
  * k6 handleSummary reporter for TestChimp.
  *
  * Usage (k6 script):
- *   import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@0.1.0/handleSummary.js';
+ *   import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@0.2.0/handleSummary.js';
  *   export { handleSummary };
  *
  * Auth: TESTCHIMP_API_KEY + TESTCHIMP_PROJECT_ID
@@ -87,8 +87,24 @@ export function handleSummary(data) {
     timeout: '30s',
   });
   const ok = res && res.status >= 200 && res.status < 300;
+  let runId = '';
+  if (ok && res.body) {
+    try {
+      const parsed = JSON.parse(res.body);
+      if (parsed && parsed.runId) {
+        runId = String(parsed.runId);
+      }
+    } catch (e) {
+      // ignore non-JSON bodies
+    }
+  }
   const line = ok
-      ? `TestChimp perf ingest ok (${res.status}) ${url}\n`
+      ? `TestChimp perf ingest ok (${res.status}) ${url}${runId ? ` runId=${runId}` : ''}\n`
       : `TestChimp perf ingest failed (${res ? res.status : 'no-response'}) ${url} ${res && res.body ? res.body : ''}\n`;
-  return { stdout: text + line };
+  const out = { stdout: text + line };
+  const runIdFile = env.TESTCHIMP_PERF_RUN_ID_FILE;
+  if (ok && runId && runIdFile) {
+    out[runIdFile] = runId;
+  }
+  return out;
 }

@@ -90,3 +90,7 @@ export function buildIngestBody(summaryData, env, meta) {
 export function ingestUrl(env) {
   return `${resolveIngestBaseUrl(env)}/api/ingest_perf_run_report`;
 }
+
+export function attachTimeseriesUrl(env) {
+  return `${resolveIngestBaseUrl(env)}/api/ingest_perf_run_timeseries`;
+}
