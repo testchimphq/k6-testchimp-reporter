@@ -5,7 +5,7 @@ k6 `handleSummary` reporter for TestChimp performance runs. k6-compatible ESM â€
 ## Usage
 
 ```js
-import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@0.2.2/handleSummary.js';
+import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@0.2.3/handleSummary.js';
 export { handleSummary };
 
 export const testchimp = {
@@ -81,6 +81,8 @@ by **metric name** (tags folded together):
 | gauge | `{name}` (last value in the bucket) |
 
 Custom metrics (e.g. `Trend('checkout_wait')`) are included the same way.
+`volume_size` is a **known gauge** (â‰¥ **0.2.3**) so volume charts plot last
+value even when the dump omits a Metric record.
 Timeseries JSON is **version 2** and includes a `metrics` catalog. v1 aliases
 (`http_req_duration_p95`, `http_req_failed_rate`, `http_reqs_rate`) are still
 written so older Executions charts keep working. Metric records in the k6 dump
@@ -119,7 +121,7 @@ Optional overrides in a project:
 K6_REPORTER_LOCAL_DIR=/path/to/k6-testchimp-reporter k6/scripts/prepare.sh
 
 # pin a specific release (CI reproducibility)
-K6_REPORTER_VERSION=0.2.2 k6/scripts/prepare.sh
+K6_REPORTER_VERSION=0.2.3 k6/scripts/prepare.sh
 
 # reuse already-downloaded lib (offline / airgapped)
 K6_REPORTER_SKIP_REFRESH=1 k6/scripts/prepare.sh

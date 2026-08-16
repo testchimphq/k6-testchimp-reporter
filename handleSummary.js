@@ -2,7 +2,7 @@
  * k6 handleSummary reporter for TestChimp.
  *
  * Usage (k6 script):
- *   import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@0.2.2/handleSummary.js';
+ *   import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@0.2.3/handleSummary.js';
  *   export { handleSummary };
  *
  * Auth: TESTCHIMP_API_KEY + TESTCHIMP_PROJECT_ID

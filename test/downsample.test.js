@@ -205,6 +205,19 @@ describe('downsampleK6JsonMetrics', () => {
     }
   });
 
+  it('buckets volume_size as a gauge even without a Metric record', () => {
+    const t0 = '2024-01-01T00:00:00.000Z';
+    const t1 = '2024-01-01T00:00:03.000Z';
+    const raw = ndjson([
+      point('volume_size', t0, 100),
+      point('volume_size', t1, 500),
+      point('vus', t0, 1),
+    ]);
+    const { points } = downsampleK6JsonMetrics(raw, { intervalSec: 5 });
+    assert.equal(points[0].volume_size, 500);
+    assert.equal(points[0]['volume_size.p95'], undefined);
+  });
+
   it('treats unknown custom metrics as trends when no Metric record is present', () => {
     const t0 = '2024-01-01T00:00:00.000Z';
     const { points, metrics } = downsampleK6JsonMetrics(

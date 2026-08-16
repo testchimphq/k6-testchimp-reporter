@@ -205,6 +205,7 @@ const KNOWN_TYPES = {
   iterations: 'counter',
   vus: 'gauge',
   vus_max: 'gauge',
+  volume_size: 'gauge',
 };
 
 const VALID_TYPES = new Set(['trend', 'counter', 'gauge', 'rate']);
