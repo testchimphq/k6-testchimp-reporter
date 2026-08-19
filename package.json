@@ -1,6 +1,6 @@
 {
   "name": "@testchimp/k6",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "k6 handleSummary reporter that ingests performance run summaries into TestChimp",
   "type": "module",
   "main": "handleSummary.js",

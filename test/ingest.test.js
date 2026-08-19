@@ -4,6 +4,7 @@ import {
   buildIngestBody,
   inferKind,
   mapSaaSFeatureserviceToIngress,
+  resolveBatchInvocationId,
   resolveIngestBaseUrl,
 } from '../ingest.js';
 
@@ -51,6 +52,33 @@ describe('buildIngestBody', () => {
     assert.deepEqual(body.report.scenarios, ['#TS-101']);
     assert.equal(body.report.branchName, 'feat/perf');
     assert.ok(body.report.summaryJson.includes('p(95)'));
+  });
+
+  it('uses TESTCHIMP_BATCH_INVOCATION_ID when set', () => {
+    const body = buildIngestBody(
+      {},
+      {
+        TESTCHIMP_FOLDER_PATH: 'k6/journeys',
+        TESTCHIMP_FILE_NAME: 'checkout.js',
+        TESTCHIMP_BATCH_INVOCATION_ID: '  suite-batch-1  ',
+      },
+      { id: 'checkout-journey' }
+    );
+    assert.equal(body.report.batchInvocationId, 'suite-batch-1');
+    assert.equal(resolveBatchInvocationId({ TESTCHIMP_BATCH_INVOCATION_ID: 'suite-batch-1' }), 'suite-batch-1');
+  });
+
+  it('generates a UUID batch id when env is missing', () => {
+    const body = buildIngestBody(
+      {},
+      { TESTCHIMP_FOLDER_PATH: 'k6/journeys', TESTCHIMP_FILE_NAME: 'checkout.js' },
+      { id: 'checkout-journey' }
+    );
+    assert.match(body.report.batchInvocationId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.notEqual(
+      resolveBatchInvocationId({}),
+      resolveBatchInvocationId({})
+    );
   });
 
   it('maps composite members from meta', () => {

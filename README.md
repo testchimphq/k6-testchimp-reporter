@@ -5,7 +5,7 @@ k6 `handleSummary` reporter for TestChimp performance runs. k6-compatible ESM â€
 ## Usage
 
 ```js
-import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@0.2.3/handleSummary.js';
+import { handleSummary } from 'https://cdn.jsdelivr.net/npm/@testchimp/k6@latest/handleSummary.js';
 export { handleSummary };
 
 export const testchimp = {
@@ -34,6 +34,7 @@ k6 cannot read sibling `export const testchimp` from `handleSummary`. Pass the s
 | `TESTCHIMP_PERF_MEMBERS` | comma-separated member `testchimp.id`s (composites) |
 | `TESTCHIMP_FOLDER_PATH` / `TESTCHIMP_FILE_NAME` | Path under SmartTests root (required to ingest) |
 | `TESTCHIMP_BRANCH_NAME` | Git branch (or `GITHUB_REF_NAME`) |
+| `TESTCHIMP_BATCH_INVOCATION_ID` | Suite batch id. Prefer the `k6/scripts/run.sh` wrapper, which mints one id for the whole suite. If unset, the reporter generates a UUID (one per `k6 run`). |
 | `TESTCHIMP_PERF_META` | Optional JSON blob of the `testchimp` object |
 | `TESTCHIMP_PERF_RUN_ID_FILE` | Optional path; on successful ingest, `handleSummary` writes `runId` here (k6 file-return) |
 

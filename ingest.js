@@ -38,6 +38,20 @@ function envStr(env, key) {
   return v == null ? '' : String(v).trim();
 }
 
+/** k6- and Node-safe UUID v4 (same shape as the Playwright reporter). */
+export function generateUuid() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/** Prefer TESTCHIMP_BATCH_INVOCATION_ID; never return empty. */
+export function resolveBatchInvocationId(env) {
+  return envStr(env, 'TESTCHIMP_BATCH_INVOCATION_ID') || generateUuid();
+}
+
 export function inferKind(folderPath, fileName, explicitKind) {
   if (explicitKind === 'journey' || explicitKind === 'JOURNEY') return 'JOURNEY';
   if (explicitKind === 'composite' || explicitKind === 'COMPOSITE') return 'COMPOSITE';
@@ -75,7 +89,7 @@ export function buildIngestBody(summaryData, env, meta) {
       scenarios: Array.isArray(m.scenarios) ? m.scenarios : [],
       memberTestchimpIds: Array.isArray(m.members) ? m.members : [],
       branchName: envStr(e, 'TESTCHIMP_BRANCH_NAME') || envStr(e, 'GITHUB_REF_NAME') || envStr(e, 'CI_COMMIT_REF_NAME'),
-      batchInvocationId: envStr(e, 'TESTCHIMP_BATCH_INVOCATION_ID'),
+      batchInvocationId: resolveBatchInvocationId(e),
       environment: envStr(e, 'TESTCHIMP_ENV') || envStr(e, 'TESTCHIMP_ENVIRONMENT'),
       release: envStr(e, 'TESTCHIMP_RELEASE'),
       profile: envStr(e, 'TESTCHIMP_PERF_PROFILE') || m.profile || '',
