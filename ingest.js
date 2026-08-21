@@ -108,3 +108,47 @@ export function ingestUrl(env) {
 export function attachTimeseriesUrl(env) {
   return `${resolveIngestBaseUrl(env)}/api/ingest_perf_run_timeseries`;
 }
+
+export function buildCompletePerfBatchBody(env) {
+  return {
+    batchInvocationId: resolveBatchInvocationId(env),
+  };
+}
+
+export function completePerfBatchUrl(env) {
+  return `${resolveIngestBaseUrl(env)}/api/complete_perf_batch_invocation`;
+}
+
+/**
+ * Suite-end: finalize perf batch and emit product notifications.
+ * Called once from k6/scripts/run.sh (not from per-journey handleSummary).
+ */
+export async function postCompletePerfBatch(env, fetchImpl = globalThis.fetch) {
+  const apiKey = envStr(env, 'TESTCHIMP_API_KEY');
+  const projectId = envStr(env, 'TESTCHIMP_PROJECT_ID');
+  if (!apiKey || !projectId) {
+    return { skipped: true, reason: 'TESTCHIMP_API_KEY and TESTCHIMP_PROJECT_ID required' };
+  }
+  const batchInvocationId = resolveBatchInvocationId(env);
+  if (!batchInvocationId) {
+    return { skipped: true, reason: 'batch invocation id missing' };
+  }
+  const url = completePerfBatchUrl(env);
+  const res = await fetchImpl(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'testchimp-api-key': apiKey,
+      'Project-Id': projectId,
+    },
+    body: JSON.stringify(buildCompletePerfBatchBody(env)),
+  });
+  const body = typeof res.text === 'function' ? await res.text() : '';
+  return {
+    ok: res.ok,
+    status: res.status,
+    body,
+    batchInvocationId,
+    url,
+  };
+}

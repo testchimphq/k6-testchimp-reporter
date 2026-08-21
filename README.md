@@ -37,6 +37,9 @@ k6 cannot read sibling `export const testchimp` from `handleSummary`. Pass the s
 | `TESTCHIMP_BATCH_INVOCATION_ID` | Suite batch id. Prefer the `k6/scripts/run.sh` wrapper, which mints one id for the whole suite. If unset, the reporter generates a UUID (one per `k6 run`). |
 | `TESTCHIMP_PERF_META` | Optional JSON blob of the `testchimp` object |
 | `TESTCHIMP_PERF_RUN_ID_FILE` | Optional path; on successful ingest, `handleSummary` writes `runId` here (k6 file-return) |
+| `TESTCHIMP_SKIP_SUITE_BATCH_COMPLETE` | Set to `1` to skip suite-end `complete_perf_batch_invocation` (when not using `k6/scripts/run.sh`) |
+
+Suite-end batch completion: `k6/scripts/run.sh` calls `POST /api/complete_perf_batch_invocation` once after all journeys (requires the same `TESTCHIMP_BATCH_INVOCATION_ID`). Library helper: `postCompletePerfBatch(process.env)` from `./ingest.js`.
 
 ## Timeseries (optional)
 

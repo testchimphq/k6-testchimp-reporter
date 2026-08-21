@@ -1,9 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildCompletePerfBatchBody,
   buildIngestBody,
+  completePerfBatchUrl,
   inferKind,
   mapSaaSFeatureserviceToIngress,
+  postCompletePerfBatch,
   resolveBatchInvocationId,
   resolveIngestBaseUrl,
 } from '../ingest.js';
@@ -96,5 +99,47 @@ describe('inferKind', () => {
   it('detects composites from path', () => {
     assert.equal(inferKind('k6/composites', 'peak.js'), 'COMPOSITE');
     assert.equal(inferKind('k6/journeys', 'checkout.js'), 'JOURNEY');
+  });
+});
+
+describe('postCompletePerfBatch', () => {
+  it('builds complete batch URL and body', () => {
+    const env = {
+      TESTCHIMP_INGRESS_URL: 'https://ingress-staging.testchimp.io',
+      TESTCHIMP_BATCH_INVOCATION_ID: 'suite-42',
+    };
+    assert.equal(
+      completePerfBatchUrl(env),
+      'https://ingress-staging.testchimp.io/api/complete_perf_batch_invocation'
+    );
+    assert.deepEqual(buildCompletePerfBatchBody(env), { batchInvocationId: 'suite-42' });
+  });
+
+  it('skips when credentials missing', async () => {
+    const result = await postCompletePerfBatch({ TESTCHIMP_BATCH_INVOCATION_ID: 'x' });
+    assert.equal(result.skipped, true);
+  });
+
+  it('posts once with auth headers', async () => {
+    let captured;
+    const fetchImpl = async (url, init) => {
+      captured = { url, init };
+      return { ok: true, status: 200, text: async () => '{}' };
+    };
+    const result = await postCompletePerfBatch(
+      {
+        TESTCHIMP_INGRESS_URL: 'https://ingress.testchimp.io',
+        TESTCHIMP_API_KEY: 'key-1',
+        TESTCHIMP_PROJECT_ID: 'proj-1',
+        TESTCHIMP_BATCH_INVOCATION_ID: 'batch-9',
+      },
+      fetchImpl
+    );
+    assert.equal(result.ok, true);
+    assert.equal(captured.url, 'https://ingress.testchimp.io/api/complete_perf_batch_invocation');
+    assert.equal(captured.init.method, 'POST');
+    assert.equal(captured.init.headers['testchimp-api-key'], 'key-1');
+    assert.equal(captured.init.headers['Project-Id'], 'proj-1');
+    assert.deepEqual(JSON.parse(captured.init.body), { batchInvocationId: 'batch-9' });
   });
 });
